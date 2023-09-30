@@ -1,59 +1,156 @@
-const express = require('express');
+/* const WebSocket = require('ws');
+const http = require('http');
 const { SerialPort, ReadlineParser } = require('serialport');
-const cors = require('cors');
 
-// Replace '/dev/ttyUSB0' with the correct serial port name for your fingerprint reader
 const sp = new SerialPort({ path: "COM3", baudRate: 9600 });
-const parser = sp.pipe(new ReadlineParser())
-const app = express();
-const port = 80;
+const parser = sp.pipe(new ReadlineParser());
 
-// Set up CORS middleware with specific options
-const corsOptions = {
-  origin: "http://libraryman.com",
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end('WebSocket server is running');
+});
+
+const wss = new WebSocket.Server({ noServer: true });
+
+wss.on('connection', (ws) => {
+  ws.on('message', (message) => {
+    console.log(message);
+    // Forward the message to the Serial Port
+    if (sp.isOpen) {
+      sp.write(message, (err) => {
+        if (err) {
+          console.error('Error writing to COM3:', err);
+          ws.send(JSON.stringify({ message: 'Device connection failed' }));
+        }
+      });
+    } else {
+      ws.send(JSON.stringify({ message: "Device connection failed" }))
+    }
+  });
+
+  // Listen for data from the Serial Port
+  parser.on('data', (data) => {
+    ws.send(JSON.stringify(data));
+  });
+
+  ws.on('close', () => {
+    console.log('Client disconnected');
+  });
+});
+
+server.on('upgrade', (request, socket, head) => {
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.emit('connection', ws, request);
+  });
+});
+
+const HOST = 'sensor.libraryman.com';
+const PORT = 80;
+
+server.listen(PORT, HOST, () => {
+  console.log(`WebSocket server is running at ws://${HOST}:${PORT}`);
+}); */
+
+const WebSocket = require('ws');
+const http = require('http');
+const { SerialPort, ReadlineParser } = require('serialport');
+
+let sp; // Declare SerialPort outside of the connection handler
+let wsServer;
+let isDeviceConnected = false; // Flag to track device connection status
+
+const createSerialPort = () => {
+  // Create a SerialPort instance for COM3
+  sp = new SerialPort({ path: "COM3", baudRate: 9600 });
+  const parser = sp.pipe(new ReadlineParser());
+
+  // SerialPort data event handler (assuming you want to receive data from COM3)
+  parser.on('data', (data) => {
+    if (wsServer && wsServer.clients.size > 0) {
+      wsServer.clients.forEach((client) => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify(data));
+        }
+      });
+    }
+  });
+
+  // Handle SerialPort errors
+  sp.on('error', (err) => {
+    console.error('COM3 Port Error:', err);
+    if (isDeviceConnected) {
+      isDeviceConnected = false;
+      // Trigger reconnection logic here (e.g., retry connecting to the device).
+      // You can implement an exponential backoff retry strategy to avoid flooding
+      // the device with connection attempts.
+      setTimeout(createSerialPort, 5000); // Retry after 5 seconds (adjust as needed)
+    }
+  });
+
+  // Handle COM3 port open event
+  sp.on('open', () => {
+    console.log('COM3 Port opened');
+    isDeviceConnected = true;
+  });
+
+  // Handle COM3 port close event
+  sp.on('close', () => {
+    console.log('COM3 Port closed');
+    isDeviceConnected = false;
+    // Trigger reconnection logic here (e.g., retry connecting to the device).
+    // You can implement an exponential backoff retry strategy to avoid flooding
+    // the device with connection attempts.
+    setTimeout(createSerialPort, 5000); // Retry after 5 seconds (adjust as needed)
+  });
 };
 
-app.use(cors(corsOptions))
-
-// Start the server
-const server = app.listen(port, 'sensor.libraryman.com', () => {
-  console.log(`Server running on port ${port}`);
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end('WebSocket server is running');
 });
 
-// Set up socket.io to enable real-time communication with the frontend
-const io = require('socket.io')(server, {
-  cors: corsOptions
-});
+const wss = new WebSocket.Server({ noServer: true });
 
-
-sp.on("error", (error) => {
-  console.log(error)
-})
-
-sp.on("close", () => {
-  console.log("connection closed")
-})
-
-// Middleware to read incoming data from the serial port
-parser.on('data', (data) => {
-  const jsonData = JSON.parse(data)
-  console.log(jsonData);
-  // Send the data back to the client that made the request
-  io.emit('sensors', jsonData);
-
-});
-
-
-app.get('/server', (req, res) => {
-  const { finger } = req.query;
-  if (finger === 'true') {
-    // Request fingerprint data from the serial port
-    res.setHeader("Content-type", "Application/JSON")
-    res.status(200).json({ message: 'Fingerprint request sent' });
-  } else {
-    res.status(400).json({ error: 'Invalid request' });
+wss.on('connection', (ws) => {
+  if (!sp || !sp.isOpen) {
+    // If the SerialPort is not open, create a new SerialPort instance
+    createSerialPort();
   }
+
+  ws.on('message', (message) => {
+    console.log(message);
+    if (isDeviceConnected && sp.isOpen) {
+      sp.write(message, (err) => {
+        if (err) {
+          console.error('Error writing to COM3:', err);
+          ws.send(JSON.stringify({ message: 'Device connection failed' }));
+        }
+      });
+    } else {
+      ws.send(JSON.stringify({ message: 'Device connection failed' }));
+
+      if (!sp || !sp.isOpen) {
+        createSerialPort()
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('Client disconnected');
+  });
+});
+
+server.on('upgrade', (request, socket, head) => {
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.emit('connection', ws, request);
+  });
+});
+
+const HOST = 'sensor.libraryman.com';
+const PORT = 80;
+
+server.listen(PORT, HOST, () => {
+  console.log(`WebSocket server is running at ws://${HOST}:${PORT}`);
+  createSerialPort(); // Create the initial SerialPort instance
+  wsServer = wss; // Store the WebSocket server instance
 });
